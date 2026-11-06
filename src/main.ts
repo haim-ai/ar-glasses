@@ -56,20 +56,50 @@ async function loadGlasses() {
   const lens = new THREE.Box3().setFromObject(model.getObjectByName("LensesExterior") ?? model);
   const frame = new THREE.Box3().setFromObject(model.getObjectByName("Frames") ?? model);
   model.position.set(0, -(lens.min.y + lens.max.y) / 2, -(frame.max.z - 0.014));
+  // prescription lenses: clear glass (the real eyes show through, slightly refracted) with a faint anti-reflective sheen
+  const clear = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    metalness: 0,
+    roughness: 0.06,
+    transmission: 1,
+    thickness: 0.0015,
+    ior: 1.5,
+    specularIntensity: 0.7,
+    iridescence: 0.3,
+    iridescenceIOR: 1.8,
+    iridescenceThicknessRange: [220, 420],
+  });
   model.traverse((o) => {
-    if ((o as THREE.Mesh).isMesh) o.renderOrder = 2;
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    m.renderOrder = 2;
+    if (m.name.startsWith("LensesExterior")) m.material = clear;
+    if (m.name.startsWith("LensesInterior")) m.visible = false;
   });
 
-  // an invisible head behind the frame: it hides the temples when they pass behind the head
-  const head = new THREE.Mesh(new THREE.SphereGeometry(1, 40, 28), new THREE.MeshBasicMaterial({ colorWrite: false }));
+  // invisible head and ears: they write depth only, so the temples vanish behind the real head and ears
+  const debug = location.search.includes("debug");
+  const hidden = debug ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true }) : new THREE.MeshBasicMaterial({ colorWrite: false });
+  const ball = new THREE.SphereGeometry(1, 40, 28);
+  const head = new THREE.Mesh(ball, hidden);
   head.scale.set(0.066, 0.1, 0.1);
   head.position.set(0, -0.018, -0.1);
-  head.renderOrder = 1;
+  // the ear covers the hook that bends down behind it, while the straight arm stays visible on top
+  const earR = new THREE.Mesh(ball, hidden);
+  const earL = new THREE.Mesh(ball, hidden);
+  for (const [ear, side] of [
+    [earR, -1],
+    [earL, 1],
+  ] as const) {
+    ear.scale.set(0.016, 0.032, 0.032);
+    ear.position.set(side * 0.074, -0.018, -0.112);
+  }
+  for (const o of [head, earR, earL]) o.renderOrder = 1;
 
   const rig = new THREE.Group();
-  rig.add(head, model);
+  rig.add(head, earR, earL, model);
   rig.visible = false;
-  return rig;
+  return { rig, head, earR, earL, lens: clear };
 }
 
 // ---------- start ----------
@@ -89,13 +119,13 @@ async function main() {
   }
   splashText.textContent = "מכינים את המשקפיים…";
   let landmarker: FaceLandmarker;
-  let rig: THREE.Group;
+  let parts: Glasses;
   try {
-    [landmarker, rig] = await Promise.all([tracker, glasses]);
+    [landmarker, parts] = await Promise.all([tracker, glasses]);
   } catch {
     return fail("הטעינה נכשלה. נסו לרענן.", false);
   }
-  run(landmarker, rig);
+  run(landmarker, parts);
   splash.classList.add("gone");
 }
 
@@ -107,7 +137,9 @@ function fail(msg: string, canRetry: boolean) {
 retry.addEventListener("click", () => location.reload());
 
 // ---------- render loop ----------
-function run(landmarker: FaceLandmarker, rig: THREE.Group) {
+type Glasses = Awaited<ReturnType<typeof loadGlasses>>;
+
+function run(landmarker: FaceLandmarker, { rig, head, earR, earL, lens }: Glasses) {
   const W = video.videoWidth;
   const H = video.videoHeight;
 
@@ -120,6 +152,10 @@ function run(landmarker: FaceLandmarker, rig: THREE.Group) {
   const pmrem = new THREE.PMREMGenerator(renderer);
   scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
   pmrem.dispose();
+  // lenses get their own, dimmer and tilted reflection, so a light never sits right over the eyes
+  lens.envMap = scene.environment;
+  lens.envMapIntensity = 0.22;
+  lens.envMapRotation.set(0.55, 0.45, 0);
 
   // one unit = one video pixel, origin in the middle of the frame
   const camera = new THREE.OrthographicCamera(-W / 2, W / 2, H / 2, -H / 2, 1, 10000);
@@ -164,6 +200,8 @@ function run(landmarker: FaceLandmarker, rig: THREE.Group) {
   const b = new THREE.Vector3();
   const pt = (lm: { x: number; y: number; z: number }, out: THREE.Vector3) => out.set((lm.x - 0.5) * W, (0.5 - lm.y) * H, -lm.z * W);
 
+  const side = new THREE.Vector3();
+  let halfFace = 0.07;
   let seenAt = 0;
   let tracking = false;
 
@@ -199,6 +237,16 @@ function run(landmarker: FaceLandmarker, rig: THREE.Group) {
     }
     rig.position.set(fx.next(mid.x, sec), fy.next(mid.y, sec), fz.next(mid.z, sec));
     rig.scale.setScalar(fs.next(span / EYE_SPAN, sec));
+
+    // fit the hidden head and ears to this face: its width, measured at the cheek edges by the ears
+    rig.updateMatrixWorld();
+    const wR = Math.abs(rig.worldToLocal(pt(lm[234], side)).x);
+    const wL = Math.abs(rig.worldToLocal(pt(lm[454], side)).x);
+    const w = THREE.MathUtils.clamp((wR + wL) / 2, 0.055, 0.085);
+    halfFace += (w - halfFace) * (tracking ? 0.15 : 1);
+    head.scale.x = halfFace * 0.94;
+    earR.position.x = -(halfFace + 0.004);
+    earL.position.x = halfFace + 0.004;
 
     seenAt = t;
     if (!tracking) {
