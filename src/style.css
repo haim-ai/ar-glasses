@@ -153,3 +153,55 @@ body {
   padding: 4px 6px;
   direction: ltr;
 }
+
+#dots {
+  position: fixed;
+  bottom: max(28px, calc(env(safe-area-inset-bottom) + 18px));
+  left: 50%;
+  transform: translateX(-50%);
+  min-height: 46px;
+  padding: 0 20px 0 22px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  z-index: 2;
+  transition: background-color 0.25s, color 0.25s;
+}
+
+#dots::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+#dots[aria-pressed="true"] {
+  background: var(--accent);
+  color: #000;
+  border-color: transparent;
+}
+
+#dots[aria-pressed="true"]::before {
+  opacity: 1;
+}
+
+#dots[hidden] {
+  display: none;
+}
+
+#dots:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

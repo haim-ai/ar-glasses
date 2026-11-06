@@ -63,10 +63,10 @@ async function loadGlasses() {
   const gltf = await new GLTFLoader().loadAsync(`${BASE}models/sunglasses.glb`);
   const model = gltf.scene;
   model.updateMatrixWorld(true);
-  // origin = the line between the eyes: lens height, a little behind the front of the frame
+  // origin = the line between the eye corners: lens height, ~2 cm behind the front of the frame (where real glasses sit)
   const lensBox = new THREE.Box3().setFromObject(model.getObjectByName("LensesExterior") ?? model);
   const frameBox = new THREE.Box3().setFromObject(model.getObjectByName("Frames") ?? model);
-  model.position.set(0, -(lensBox.min.y + lensBox.max.y) / 2, -(frameBox.max.z - 0.014));
+  model.position.set(0, -(lensBox.min.y + lensBox.max.y) / 2, -(frameBox.max.z - 0.022));
 
   // prescription lenses: clear glass with a faint reflection and anti-reflective sheen.
   // The camera picture is drawn by the browser underneath, so the lenses are see-through, not refractive.
@@ -99,28 +99,68 @@ async function loadGlasses() {
     }
   });
 
-  // invisible head and ears: they write depth only, so the temples vanish behind the real head and ears
-  const hidden = location.search.includes("occ") ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true }) : new THREE.MeshBasicMaterial({ colorWrite: false });
+  // invisible back of the head and ears: they write depth only, so the temples vanish behind the real head and ears
+  // (?occ shows them in red, to check how they sit on a real face)
   const ball = new THREE.SphereGeometry(1, 40, 28);
-  const head = new THREE.Mesh(ball, hidden);
-  head.scale.set(0.066, 0.1, 0.1);
-  head.position.set(0, -0.018, -0.1);
+  const head = new THREE.Mesh(ball, HIDDEN);
+  head.scale.set(0.062, 0.11, 0.095);
+  head.position.set(0, -0.01, -0.1);
   // the ear covers the hook that bends down behind it, while the straight arm stays visible on top
-  const earR = new THREE.Mesh(ball, hidden);
-  const earL = new THREE.Mesh(ball, hidden);
+  const earR = new THREE.Mesh(ball, HIDDEN);
+  const earL = new THREE.Mesh(ball, HIDDEN);
   for (const [ear, side] of [
     [earR, -1],
     [earL, 1],
   ] as const) {
-    ear.scale.set(0.016, 0.032, 0.032);
-    ear.position.set(side * 0.074, -0.018, -0.112);
+    ear.scale.set(0.017, 0.032, 0.03);
+    ear.position.set(side * 0.074, -0.015, -0.1);
   }
   for (const o of [head, earR, earL]) o.renderOrder = 1;
 
+  // the glasses themselves (frame + arms) scale together to fit the face; the hidden head and ears do not
+  const glasses = new THREE.Group();
+  glasses.add(model);
   const rig = new THREE.Group();
-  rig.add(head, earR, earL, model);
+  rig.add(head, earR, earL, glasses);
   rig.visible = false;
-  return { rig, head, earR, earL, lens };
+
+  // each arm swings from its hinge, so it can open to the width of a real head and reach the ear
+  rig.updateMatrixWorld(true);
+  const arm = (name: string) => {
+    const hook = model.getObjectByName(name);
+    if (!hook) return new THREE.Group();
+    const box = new THREE.Box3().setFromObject(hook);
+    const pivot = new THREE.Group();
+    pivot.position.set(box.min.x < 0 ? box.min.x : box.max.x, (box.min.y + box.max.y) / 2, box.max.z);
+    glasses.add(pivot);
+    pivot.updateMatrixWorld(true);
+    pivot.attach(hook);
+    return pivot;
+  };
+  const armR = arm("EarhookRight");
+  const armL = arm("EarhookLeft");
+  return { rig, head, earR, earL, lens, armR, armL, glasses };
+}
+
+const HIDDEN = location.search.includes("occ")
+  ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true, side: THREE.DoubleSide })
+  : new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
+
+/** the tracker gives the face as edges; its triangles are every three points that are all linked to each other */
+function faceTriangles() {
+  const near = new Map<number, Set<number>>();
+  const link = (a: number, b: number) => (near.get(a) ?? near.set(a, new Set()).get(a)!).add(b);
+  for (const { start, end } of FaceLandmarker.FACE_LANDMARKS_TESSELATION) {
+    link(start, end);
+    link(end, start);
+  }
+  const tris: number[] = [];
+  for (const [a, na] of near)
+    for (const b of na) {
+      if (b <= a) continue;
+      for (const c of near.get(b)!) if (c > b && na.has(c)) tris.push(a, b, c);
+    }
+  return tris;
 }
 type Glasses = Awaited<ReturnType<typeof loadGlasses>>;
 
@@ -178,7 +218,11 @@ addEventListener("resize", layoutStage);
 video.addEventListener("resize", layoutStage); // the camera can change orientation
 
 // ---------- render loop ----------
-function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, earL, lens }: Glasses) {
+/** phone selfie cameras and webcams see about 75° across the diagonal; the vertical angle follows the picture's shape */
+const DIAG_FOV = 75;
+const dotsBtn = $<HTMLButtonElement>("#dots");
+
+function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, earL, lens, armR, armL, glasses }: Glasses) {
   let landmarker = first;
   let delegate = firstDelegate;
 
@@ -187,6 +231,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
+  renderer.autoClear = false;
 
   const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
@@ -196,26 +241,64 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   lens.envMap = scene.environment;
   lens.envMapIntensity = 1;
   lens.envMapRotation.set(0.55, 0.45, 0);
-  scene.add(rig);
-  // the face scan is its own layer, drawn first, so the glasses always sit on top of it
+
+  // the real face as an invisible surface: anything behind it (the far arm when you look sideways) disappears
+  const N = 478;
+  const facePos = new Float32Array(N * 3);
+  const faceAttr = new THREE.BufferAttribute(facePos, 3).setUsage(THREE.DynamicDrawUsage);
+  const faceGeo = new THREE.BufferGeometry();
+  faceGeo.setAttribute("position", faceAttr);
+  faceGeo.setIndex(faceTriangles());
+  faceGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e3);
+  const faceOcc = new THREE.Mesh(faceGeo, HIDDEN);
+  faceOcc.renderOrder = 1;
+  faceOcc.visible = false;
+  scene.add(faceOcc, rig);
+
+  // the face scan is its own flat layer in screen pixels, drawn first, so the glasses always sit on top of it
   const faceMesh = createFaceMesh("#e8ff5a");
   const meshScene = new THREE.Scene();
   meshScene.add(faceMesh.group);
-  renderer.autoClear = false;
+  let showDots = true;
+  try {
+    showDots = localStorage.getItem("ar-dots") !== "off";
+  } catch {
+    /* private mode */
+  }
+  const syncDots = () => {
+    dotsBtn.setAttribute("aria-pressed", String(showDots));
+    dotsBtn.textContent = showDots ? "נקודות: פועל" : "נקודות: כבוי";
+  };
+  dotsBtn.hidden = false;
+  syncDots();
+  dotsBtn.addEventListener("click", () => {
+    showDots = !showDots;
+    syncDots();
+    try {
+      localStorage.setItem("ar-dots", showDots ? "on" : "off");
+    } catch {
+      /* private mode */
+    }
+  });
 
-  // one unit = one camera pixel, origin in the middle of the picture
+  // a real perspective camera, like the phone's lens: the arms run back toward the ears instead of hiding behind the hinge
   let W = video.videoWidth;
   let H = video.videoHeight;
-  const camera = new THREE.OrthographicCamera(-W / 2, W / 2, H / 2, -H / 2, 1, 10000);
-  camera.position.z = 5000;
+  let f = 1;
+  const camera = new THREE.PerspectiveCamera(50, W / H, 0.01, 10);
+  const flat = new THREE.OrthographicCamera(-W / 2, W / 2, H / 2, -H / 2, -1000, 1000);
   const fitCamera = () => {
     W = video.videoWidth || W;
     H = video.videoHeight || H;
-    camera.left = -W / 2;
-    camera.right = W / 2;
-    camera.top = H / 2;
-    camera.bottom = -H / 2;
+    f = Math.hypot(W, H) / 2 / Math.tan(THREE.MathUtils.degToRad(DIAG_FOV / 2));
+    camera.aspect = W / H;
+    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(H / 2 / f));
     camera.updateProjectionMatrix();
+    flat.left = -W / 2;
+    flat.right = W / 2;
+    flat.top = H / 2;
+    flat.bottom = -H / 2;
+    flat.updateProjectionMatrix();
   };
   onLayout = (w, h) => {
     fitCamera();
@@ -224,10 +307,9 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   };
   layoutStage();
 
-  // smoothing: steady when still, quick when moving
+  // smoothing in screen pixels: steady when still, quick when moving
   const fx = new OneEuro(1.4, 0.006);
   const fy = new OneEuro(1.4, 0.006);
-  const fz = new OneEuro(1.0, 0.004);
   const fs = new OneEuro(1.0, 0.002);
   const target = new THREE.Quaternion();
   const m4 = new THREE.Matrix4();
@@ -237,30 +319,50 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   const eyeL = new THREE.Vector3();
   const a = new THREE.Vector3();
   const b = new THREE.Vector3();
-  const side = new THREE.Vector3();
-  const pt = (lm: { x: number; y: number; z: number }, out: THREE.Vector3) => out.set((lm.x - 0.5) * W, (0.5 - lm.y) * H, -lm.z * W);
+  const v = new THREE.Vector3();
+  const across = new THREE.Vector3();
+  const fwd = new THREE.Vector3();
+  const core = new THREE.Vector3();
+  type L = { x: number; y: number; z: number };
+  /** image pixels, with depth in the same pixel scale (the tracker's z is relative to the head) */
+  const px = (l: L, out: THREE.Vector3) => out.set(l.x * W, l.y * H, l.z * W);
 
+  let depth = 0.4; // metres from the lens to the eyes
+  let midZ = 0; // the eye line's z, in the tracker's pixel scale
+  /** a landmark to camera space in metres, at its own depth */
+  const toCam = (l: L, out: THREE.Vector3, push = 0) => {
+    const z = depth + ((l.z * W - midZ) * depth) / f + push;
+    return out.set(((l.x * W - W / 2) * z) / f, ((H / 2 - l.y * H) * z) / f, -z);
+  };
+
+  const ear = new THREE.Vector3();
   let halfFace = 0.07;
+  let fit = 1;
   let seenAt = 0;
   let tracking = false;
+
+  const lose = () => {
+    tracking = false;
+    rig.visible = false;
+    faceOcc.visible = false;
+    faceMesh.hide();
+    hint.hidden = false;
+  };
 
   const apply = (res: FaceLandmarkerResult, t: number) => {
     const lm = res.faceLandmarks?.[0];
     const mat = res.facialTransformationMatrixes?.[0];
     if (!lm || !mat) {
-      if (tracking && t - seenAt > 300) {
-        tracking = false;
-        rig.visible = false;
-        faceMesh.hide();
-        hint.hidden = false;
-      }
+      if (tracking && t - seenAt > 300) lose();
       return;
     }
-    faceMesh.update(lm, W, H);
+    if (showDots) faceMesh.update(lm, W, H);
+    else faceMesh.hide();
+
     // eye centres from the corners (stable, unlike the irises which follow the gaze)
-    eyeR.copy(pt(lm[33], a)).add(pt(lm[133], b)).multiplyScalar(0.5);
-    eyeL.copy(pt(lm[362], a)).add(pt(lm[263], b)).multiplyScalar(0.5);
-    const span = eyeR.distanceTo(eyeL);
+    eyeR.copy(px(lm[33], a)).add(px(lm[133], b)).multiplyScalar(0.5);
+    eyeL.copy(px(lm[362], a)).add(px(lm[263], b)).multiplyScalar(0.5);
+    const gap = Math.hypot(eyeR.x - eyeL.x, eyeR.y - eyeL.y);
     const mid = eyeR.add(eyeL).multiplyScalar(0.5);
     m4.fromArray(mat.data);
     m4.decompose(tmpP, target, tmpS);
@@ -269,30 +371,74 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     if (!tracking) {
       fx.reset();
       fy.reset();
-      fz.reset();
       fs.reset();
       rig.quaternion.copy(target);
     } else {
-      const ang = rig.quaternion.angleTo(target);
-      rig.quaternion.slerp(target, Math.min(1, 0.35 + ang * 5));
+      rig.quaternion.slerp(target, Math.min(1, 0.35 + rig.quaternion.angleTo(target) * 5));
     }
-    rig.position.set(fx.next(mid.x, sec), fy.next(mid.y, sec), fz.next(mid.z, sec));
-    rig.scale.setScalar(fs.next(span / EYE_SPAN, sec));
-
-    // fit the hidden head and ears to this face: its width, measured at the cheek edges by the ears
+    const mx = fx.next(mid.x, sec);
+    const my = fy.next(mid.y, sec);
+    // the real distance between the eyes tells how far the face is from the lens
+    // distance from the lens: the eyes' on-screen gap, corrected for how much the head is turned (from the head pose,
+    // not the tracker's depth guess, which flattens when you look sideways)
+    across.set(EYE_SPAN, 0, 0).applyQuaternion(target);
+    const seen = Math.max(0.02, Math.hypot(across.x, across.y));
+    depth = (f * EYE_SPAN) / fs.next((gap * EYE_SPAN) / seen, sec);
+    midZ = mid.z;
+    rig.position.set(((mx - W / 2) * depth) / f, ((H / 2 - my) * depth) / f, -depth);
     rig.updateMatrixWorld();
-    const wR = Math.abs(rig.worldToLocal(pt(lm[234], side)).x);
-    const wL = Math.abs(rig.worldToLocal(pt(lm[454], side)).x);
-    const w = THREE.MathUtils.clamp((wR + wL) / 2, 0.055, 0.085);
-    halfFace += (w - halfFace) * (tracking ? 0.15 : 1);
-    head.scale.x = halfFace * 0.94;
-    earR.position.x = -(halfFace + 0.004);
-    earL.position.x = halfFace + 0.004;
+    rig.localToWorld(core.set(0, -0.01, -0.085));
+
+    // the face surface, drawn 13 mm smaller toward the middle of the head: the frame and arms that rest on the skin
+    // stay visible, while anything truly behind the face (the far arm) is hidden
+    for (let i = 0; i < N && i < lm.length; i++) {
+      toCam(lm[i], v);
+      v.sub(core);
+      v.addScaledVector(v, -0.013 / Math.max(0.03, v.length())).add(core);
+      facePos[i * 3] = v.x;
+      facePos[i * 3 + 1] = v.y;
+      facePos[i * 3 + 2] = v.z;
+    }
+    faceAttr.needsUpdate = true;
+
+    // back of the head and ears, fitted to this face: width from the cheek edges by the ears (234 / 454)
+    const eR = rig.worldToLocal(toCam(lm[234], ear)).clone();
+    const eL = rig.worldToLocal(toCam(lm[454], ear)).clone();
+    const w = THREE.MathUtils.clamp((Math.abs(eR.x) + Math.abs(eL.x)) / 2, 0.055, 0.085);
+    // head width is measured only while the face looks at the camera; when it turns, the far side is a guess, so we hold it
+    fwd.set(0, 0, 1).applyQuaternion(target);
+    const frontal = Math.abs(Math.atan2(fwd.x, fwd.z)) < 0.26 && Math.abs(fwd.y) < 0.35;
+    const k = frontal ? (tracking ? 0.15 : 1) : 0;
+    halfFace += (w - halfFace) * k;
+    head.scale.x = halfFace * 0.9;
+    // open the arms just enough to run along the side of this head to the ear (real hinges flex the same way)
+    // size the frame so its hinges land on the temples (face edge at eye level: 127 / 356)
+    const tR = rig.worldToLocal(toCam(lm[127], ear)).x;
+    const tL = rig.worldToLocal(toCam(lm[356], ear)).x;
+    const fitTo = THREE.MathUtils.clamp((Math.abs(tR) + Math.abs(tL)) / 2 / 0.072, 0.92, 1.2);
+    fit += (fitTo - fit) * k;
+    glasses.scale.setScalar(fit);
+    const open = THREE.MathUtils.clamp(Math.atan2(halfFace - 0.066 * fit, 0.1), -0.04, 0.22);
+    armR.rotation.y = open;
+    armL.rotation.y = -open;
+    // the ear starts just behind that cheek point; clamp to a human range in case the depth guess is off
+    for (const [o, e, s] of [
+      [earR, eR, -1],
+      [earL, eL, 1],
+    ] as const) {
+      const ex = s * (halfFace + 0.006);
+      const ey = THREE.MathUtils.clamp(e.y - 0.008, -0.03, 0);
+      const ez = THREE.MathUtils.clamp(e.z - 0.028, -0.12, -0.085);
+      o.position.x += (ex - o.position.x) * k;
+      o.position.y += (ey - o.position.y) * k;
+      o.position.z += (ez - o.position.z) * k;
+    }
 
     seenAt = t;
     if (!tracking) {
       tracking = true;
       rig.visible = true;
+      faceOcc.visible = true;
       hint.hidden = true;
     }
   };
@@ -357,12 +503,12 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     if (tracking) everSeen = true;
     watch(performance.now() - t, t);
     renderer.clear();
-    renderer.render(meshScene, camera);
+    renderer.render(meshScene, flat);
     renderer.render(scene, camera);
     if (stats) {
       frames++;
       if (t - fpsAt > 1000) {
-        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"}${lastErr ? " · " + lastErr : ""}`;
+        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"} · ${(depth * 100).toFixed(0)}cm${lastErr ? " · " + lastErr : ""}`;
         frames = 0;
         fpsAt = t;
       }
