@@ -77,6 +77,7 @@ async function loadGlasses() {
     transparent: true,
     opacity: 0.14,
     depthWrite: false,
+    depthTest: false, // the lens is always in front of the face; never let the hidden face cover it
     specularIntensity: 0.8,
     iridescence: 0.3,
     iridescenceIOR: 1.8,
@@ -85,7 +86,9 @@ async function loadGlasses() {
   model.traverse((o) => {
     const m = o as THREE.Mesh;
     if (!m.isMesh) return;
-    m.renderOrder = 2;
+    // draw order is the whole trick: the front of the glasses first (nothing can hide it), then the hidden face,
+    // head and ears (order 1), then the long arms (order 2), which disappear wherever they pass behind them
+    m.renderOrder = m.name.startsWith("Earhook") ? 2 : 0;
     if (m.name.startsWith("LensesExterior")) m.material = lens;
     else if (m.name.startsWith("LensesInterior")) m.visible = false;
     else {
@@ -508,7 +511,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     if (stats) {
       frames++;
       if (t - fpsAt > 1000) {
-        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"} · ${(depth * 100).toFixed(0)}cm${lastErr ? " · " + lastErr : ""}`;
+        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"} · glasses ${rig.visible ? "on" : "off"} · ${(depth * 100).toFixed(0)}cm · fit ${fit.toFixed(2)} · ${IOS ? "iOS" : ""}${lastErr ? " · " + lastErr : ""}`;
         frames = 0;
         fpsAt = t;
       }
