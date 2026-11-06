@@ -66,7 +66,10 @@ async function loadGlasses() {
   // origin = the line between the eye corners: lens height, ~2 cm behind the front of the frame (where real glasses sit)
   const lensBox = new THREE.Box3().setFromObject(model.getObjectByName("LensesExterior") ?? model);
   const frameBox = new THREE.Box3().setFromObject(model.getObjectByName("Frames") ?? model);
-  model.position.set(0, -(lensBox.min.y + lensBox.max.y) / 2, -(frameBox.max.z - 0.022));
+  // a little lower than the original aviator, closer to everyday prescription proportions
+  const LENS_H = 0.86;
+  model.scale.set(1, LENS_H, 1);
+  model.position.set(0, (-(lensBox.min.y + lensBox.max.y) / 2) * LENS_H, -(frameBox.max.z - 0.022));
 
   // prescription lenses: clear glass with a faint reflection and anti-reflective sheen.
   // The camera picture is drawn by the browser underneath, so the lenses are see-through, not refractive.
@@ -88,7 +91,8 @@ async function loadGlasses() {
     if (!m.isMesh) return;
     // draw order is the whole trick: the front of the glasses first (nothing can hide it), then the hidden face,
     // head and ears (order 1), then the long arms (order 2), which disappear wherever they pass behind them
-    m.renderOrder = m.name.startsWith("Earhook") ? 2 : 0;
+    // the hinge blocks (Temple*) can hide too: the far one goes behind the face when you turn
+    m.renderOrder = m.name.startsWith("Earhook") || m.name.startsWith("Temple") ? 2 : 0;
     if (m.name.startsWith("LensesExterior")) m.material = lens;
     else if (m.name.startsWith("LensesInterior")) m.visible = false;
     else {
@@ -145,7 +149,9 @@ async function loadGlasses() {
   return { rig, head, earR, earL, lens, armR, armL, glasses };
 }
 
-const HIDDEN = location.search.includes("occ")
+const HIDDEN = location.search.includes("solid")
+  ? new THREE.MeshBasicMaterial({ color: 0xff0044, side: THREE.DoubleSide })
+  : location.search.includes("occ")
   ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true, side: THREE.DoubleSide })
   : new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide });
 
@@ -163,6 +169,15 @@ function faceTriangles() {
       if (b <= a) continue;
       for (const c of near.get(b)!) if (c > b && na.has(c)) tris.push(a, b, c);
     }
+  // the face mesh has open holes at the eyes; close them (a fan from each iris centre), or the far arm shows through
+  for (const [eye, centre] of [
+    [FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE, 468],
+    [FaceLandmarker.FACE_LANDMARKS_LEFT_EYE, 473],
+  ] as const)
+    for (const { start, end } of eye) tris.push(centre, start, end);
+  // and the mouth, from the inner lip line
+  const lips = FaceLandmarker.FACE_LANDMARKS_LIPS;
+  for (const { start, end } of lips) tris.push(13, start, end);
   return tris;
 }
 type Glasses = Awaited<ReturnType<typeof loadGlasses>>;
@@ -355,6 +370,9 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   const across = new THREE.Vector3();
   const fwd = new THREE.Vector3();
   const core = new THREE.Vector3();
+  const coreLocal = new THREE.Vector3(0, -0.01, -0.085);
+  const toLens = new THREE.Vector3();
+  const local = new THREE.Vector3();
   const ax = new THREE.Vector3();
   const ay = new THREE.Vector3();
   const az = new THREE.Vector3();
@@ -384,7 +402,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
 
   const ear = new THREE.Vector3();
   let halfFace = 0.07;
-  let fit = 1;
+  let fit = 0.93; // ~14 cm frame until the face is measured
   let seenAt = 0;
   let tracking = false;
 
@@ -443,14 +461,19 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     if (!Number.isFinite(depth) || depth <= 0) return;
     rig.position.set(((mx - W / 2) * depth) / f, ((H / 2 - my) * depth) / f, -depth);
     rig.updateMatrixWorld();
-    rig.localToWorld(core.set(0, -0.01, -0.085));
+    rig.localToWorld(core.copy(coreLocal));
 
-    // the face surface, drawn 13 mm smaller toward the middle of the head: the frame and arms that rest on the skin
-    // stay visible, while anything truly behind the face (the far arm) is hidden
+    // the face surface: its outline matches the real face exactly (pushed back 3 mm in depth only), so the far arm
+    // hides precisely behind it. Only the side turned to the camera shrinks inward, so the arm resting on that temple shows.
+    rig.worldToLocal(toLens.set(0, 0, 0)).sub(coreLocal).normalize();
     for (let i = 0; i < N && i < lm.length; i++) {
-      toCam(lm[i], v);
-      v.sub(core);
-      v.addScaledVector(v, -0.013 / Math.max(0.03, v.length())).add(core);
+      toCam(lm[i], v, 0.003);
+      const xl = rig.worldToLocal(local.copy(v)).x;
+      const near = THREE.MathUtils.clamp((xl * toLens.x) / 0.02, 0, 1);
+      if (near > 0) {
+        v.sub(core);
+        v.addScaledVector(v, (-0.012 * near) / Math.max(0.03, v.length())).add(core);
+      }
       facePos[i * 3] = v.x;
       facePos[i * 3 + 1] = v.y;
       facePos[i * 3 + 2] = v.z;
@@ -468,10 +491,11 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     halfFace += (w - halfFace) * k;
     head.scale.x = halfFace * 0.9;
     // open the arms just enough to run along the side of this head to the ear (real hinges flex the same way)
-    // size the frame so its hinges land on the temples (face edge at eye level: 127 / 356)
+    // size the frame to the face (temple points by the ears: 127 / 356)
     const tR = rig.worldToLocal(toCam(lm[127], ear)).x;
     const tL = rig.worldToLocal(toCam(lm[356], ear)).x;
-    const fitTo = THREE.MathUtils.clamp((Math.abs(tR) + Math.abs(tL)) / 2 / 0.072, 0.92, 1.2);
+    // a frame sits a little inside the temple points, and is never stretched past a normal ~14 cm size
+    const fitTo = THREE.MathUtils.clamp(((Math.abs(tR) + Math.abs(tL)) / 2) * 0.9 / 0.075, 0.82, 0.93);
     fit += (fitTo - fit) * k;
     glasses.scale.setScalar(fit);
     const open = THREE.MathUtils.clamp(Math.atan2(halfFace - 0.066 * fit, 0.1), -0.04, 0.22);
