@@ -235,13 +235,42 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
   renderer.autoClear = false;
+  // if this phone's graphics chip can't build a material, swap the glasses to simpler ones instead of showing nothing
+  let shaderNote = "";
+  renderer.debug.onShaderError = (gl, program) => {
+    shaderNote = "shader: " + (gl.getProgramInfoLog(program) || "failed").slice(0, 60);
+    rig.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || (m.material as THREE.Material).colorWrite === false) return;
+      const old = m.material as THREE.MeshStandardMaterial;
+      if (old.type === "MeshBasicMaterial") return;
+      m.material = new THREE.MeshBasicMaterial({ color: old.color ?? 0xdddddd, map: old.map ?? null, transparent: old.transparent, opacity: old.opacity, depthTest: old.depthTest, depthWrite: old.depthWrite });
+    });
+  };
 
   const scene = new THREE.Scene();
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  pmrem.dispose();
+  // reflections come from a soft studio environment; phones that can't render to half-float buffers get plain lights instead
+  const gl = renderer.getContext();
+  const canEnv = renderer.extensions.has("EXT_color_buffer_half_float") || renderer.extensions.has("EXT_color_buffer_float");
+  let envNote = "env:studio";
+  if (canEnv) {
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmrem.dispose();
+    if (gl.getError() !== gl.NO_ERROR) envNote = "env:error";
+  } else envNote = "env:lights";
+  if (envNote !== "env:studio") {
+    scene.environment = null;
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(0.3, 0.6, 1);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x8899aa, 1.4), key);
+    rig.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+      if (m && "metalness" in m) m.metalness = Math.min(m.metalness, 0.5);
+    });
+  }
   // lenses get their own tilted reflection, so a light never sits right over the eyes
-  lens.envMap = scene.environment;
+  lens.envMap = scene.environment ?? null;
   lens.envMapIntensity = 1;
   lens.envMapRotation.set(0.55, 0.45, 0);
 
@@ -326,6 +355,21 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   const across = new THREE.Vector3();
   const fwd = new THREE.Vector3();
   const core = new THREE.Vector3();
+  const ax = new THREE.Vector3();
+  const ay = new THREE.Vector3();
+  const az = new THREE.Vector3();
+  const basis = new THREE.Matrix4();
+  let poseFrom = "";
+  /** head rotation straight from the face points: across the eyes, and up from under the nose to the forehead */
+  const landmarkPose = (lm: L[], out: THREE.Quaternion) => {
+    const up = (l: L, o: THREE.Vector3) => o.set(l.x * W, -l.y * H, -l.z * W);
+    up(lm[263], ax).sub(up(lm[33], a)).normalize();
+    up(lm[10], ay).sub(up(lm[2], a));
+    ay.addScaledVector(ax, -ay.dot(ax)).normalize();
+    az.crossVectors(ax, ay);
+    return out.setFromRotationMatrix(basis.makeBasis(ax, ay, az));
+  };
+  const finite = (q: THREE.Quaternion) => Number.isFinite(q.x + q.y + q.z + q.w) && Math.abs(q.lengthSq() - 1) < 0.01;
   type L = { x: number; y: number; z: number };
   /** image pixels, with depth in the same pixel scale (the tracker's z is relative to the head) */
   const px = (l: L, out: THREE.Vector3) => out.set(l.x * W, l.y * H, l.z * W);
@@ -355,7 +399,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   const apply = (res: FaceLandmarkerResult, t: number) => {
     const lm = res.faceLandmarks?.[0];
     const mat = res.facialTransformationMatrixes?.[0];
-    if (!lm || !mat) {
+    if (!lm || lm.length < 468) {
       if (tracking && t - seenAt > 300) lose();
       return;
     }
@@ -367,8 +411,16 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     eyeL.copy(px(lm[362], a)).add(px(lm[263], b)).multiplyScalar(0.5);
     const gap = Math.hypot(eyeR.x - eyeL.x, eyeR.y - eyeL.y);
     const mid = eyeR.add(eyeL).multiplyScalar(0.5);
-    m4.fromArray(mat.data);
-    m4.decompose(tmpP, target, tmpS);
+    // the tracker's head pose when it is sound; otherwise our own, from the points (some phones return a broken one)
+    let ok = false;
+    if (mat?.data?.length === 16 && !location.search.includes("points")) {
+      m4.fromArray(mat.data);
+      m4.decompose(tmpP, target, tmpS);
+      ok = finite(target) && Math.abs(m4.determinant()) > 1e-6;
+    }
+    if (!ok) landmarkPose(lm, target);
+    poseFrom = ok ? "pose:mp" : "pose:points";
+    if (!finite(target)) return;
 
     const sec = t / 1000;
     if (!tracking) {
@@ -388,6 +440,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     const seen = Math.max(0.02, Math.hypot(across.x, across.y));
     depth = (f * EYE_SPAN) / fs.next((gap * EYE_SPAN) / seen, sec);
     midZ = mid.z;
+    if (!Number.isFinite(depth) || depth <= 0) return;
     rig.position.set(((mx - W / 2) * depth) / f, ((H / 2 - my) * depth) / f, -depth);
     rig.updateMatrixWorld();
     rig.localToWorld(core.set(0, -0.01, -0.085));
@@ -507,11 +560,15 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     watch(performance.now() - t, t);
     renderer.clear();
     renderer.render(meshScene, flat);
-    renderer.render(scene, camera);
+    try {
+      renderer.render(scene, camera);
+    } catch (e) {
+      lastErr = "render: " + String(e).slice(0, 60);
+    }
     if (stats) {
       frames++;
       if (t - fpsAt > 1000) {
-        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"} · glasses ${rig.visible ? "on" : "off"} · ${(depth * 100).toFixed(0)}cm · fit ${fit.toFixed(2)} · ${IOS ? "iOS" : ""}${lastErr ? " · " + lastErr : ""}`;
+        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"} · glasses ${rig.visible ? "on" : "off"} · ${(depth * 100).toFixed(0)}cm · fit ${fit.toFixed(2)} · ${IOS ? "iOS" : ""} · ${poseFrom} · ${envNote}${shaderNote ? " · " + shaderNote : ""}${lastErr ? " · " + lastErr : ""}`;
         frames = 0;
         fpsAt = t;
       }
