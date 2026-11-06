@@ -306,6 +306,17 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   const faceMesh = createFaceMesh("#e8ff5a");
   const meshScene = new THREE.Scene();
   meshScene.add(faceMesh.group);
+  // the camera picture is drawn here too, from the very frame the face was found on, so the glasses never trail the face.
+  // (the live <video> stays underneath, playing, so the phone keeps decoding it)
+  // a video texture (re-uploaded each frame, never stored once); we flag every new frame ourselves from the loop
+  const videoTex = new THREE.VideoTexture(video);
+  videoTex.colorSpace = THREE.SRGBColorSpace;
+  videoTex.generateMipmaps = false;
+  videoTex.minFilter = THREE.LinearFilter;
+  const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: videoTex, toneMapped: false, depthWrite: false, depthTest: false }));
+  backdrop.position.z = -500;
+  backdrop.renderOrder = -1;
+  meshScene.add(backdrop);
   let showDots = true;
   try {
     showDots = localStorage.getItem("ar-dots") !== "off";
@@ -346,6 +357,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     flat.top = H / 2;
     flat.bottom = -H / 2;
     flat.updateProjectionMatrix();
+    backdrop.scale.set(W, H, 1);
   };
   onLayout = (w, h) => {
     fitCamera();
@@ -355,9 +367,10 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   layoutStage();
 
   // smoothing in screen pixels: steady when still, quick when moving
-  const fx = new OneEuro(1.4, 0.006);
-  const fy = new OneEuro(1.4, 0.006);
-  const fs = new OneEuro(1.0, 0.002);
+  // light smoothing: only the tiny jitter is damped, real movement passes straight through
+  const fx = new OneEuro(3.0, 0.02);
+  const fy = new OneEuro(3.0, 0.02);
+  const fs = new OneEuro(2.0, 0.01);
   const target = new THREE.Quaternion();
   const m4 = new THREE.Matrix4();
   const tmpP = new THREE.Vector3();
@@ -447,7 +460,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
       fs.reset();
       rig.quaternion.copy(target);
     } else {
-      rig.quaternion.slerp(target, Math.min(1, 0.35 + rig.quaternion.angleTo(target) * 5));
+      rig.quaternion.slerp(target, Math.min(1, 0.6 + rig.quaternion.angleTo(target) * 8));
     }
     const mx = fx.next(mid.x, sec);
     const my = fy.next(mid.y, sec);
@@ -570,6 +583,7 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     requestAnimationFrame(loop);
     if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
     lastVideoTime = video.currentTime;
+    videoTex.needsUpdate = true;
     const t = performance.now();
     let res: FaceLandmarkerResult;
     try {

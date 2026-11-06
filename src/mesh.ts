@@ -57,26 +57,22 @@ export function createFaceMesh(accent: string) {
   group.visible = false;
   for (const g of [dotsGeo, webGeo, lineGeo]) g.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 1e6);
 
-  let fresh = true;
   return {
     group,
-    /** landmarks → screen units; a light follow keeps it calm without lag */
+    /** landmarks → screen units, exactly on this frame's face (no follow-lag) */
     update(lm: { x: number; y: number; z: number }[], W: number, H: number) {
-      const k = fresh ? 1 : 0.65;
       const n = Math.min(N, lm.length);
       for (let i = 0; i < n; i++) {
         const j = i * 3;
-        positions[j] += ((lm[i].x - 0.5) * W - positions[j]) * k;
-        positions[j + 1] += ((0.5 - lm[i].y) * H - positions[j + 1]) * k;
+        positions[j] = (lm[i].x - 0.5) * W;
+        positions[j + 1] = (0.5 - lm[i].y) * H;
         positions[j + 2] = 0;
       }
       pos.needsUpdate = true;
-      fresh = false;
       group.visible = true;
     },
     hide() {
       group.visible = false;
-      fresh = true;
     },
   };
 }
