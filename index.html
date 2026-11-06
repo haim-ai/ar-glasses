@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="מדידת משקפיים במציאות רבודה: המצלמה נפתחת, והמשקפיים יושבים לכם על הפנים." />
+    <title>משקפיים AR</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500&display=swap" />
+    <link rel="preload" href="./models/sunglasses.glb" as="fetch" crossorigin />
+    <script type="module" crossorigin src="./assets/index-CQuBXTbf.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DQTuoSX1.css">
+  </head>
+  <body>
+    <main id="stage" aria-label="תצוגת מצלמה עם משקפיים">
+      <video id="cam" playsinline muted autoplay></video>
+      <canvas id="gl"></canvas>
+    </main>
+
+    <div id="splash" role="status" aria-live="polite">
+      <span class="ring" aria-hidden="true"></span>
+      <p id="splash-text">פותחים מצלמה…</p>
+      <button id="retry" type="button" hidden>לאפשר מצלמה</button>
+    </div>
+
+    <p id="hint" role="status" aria-live="polite" hidden>הביטו למצלמה</p>
+
+    <a id="credit" href="https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/SunglassesKhronos" target="_blank" rel="noopener noreferrer">Sunglasses: Eric Chadwick, DGG · CC BY 4.0</a>
+
+  </body>
+</html>
