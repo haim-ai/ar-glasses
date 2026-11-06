@@ -1,0 +1,142 @@
+:root {
+  --bg: #000;
+  --ink: #fff;
+  --glass: rgba(20, 20, 22, 0.55);
+  --line: rgba(255, 255, 255, 0.16);
+  --accent: #e8ff5a;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Google Sans", system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* the camera frame covers the screen; JS sizes it to the video's aspect, CSS mirrors it like a mirror */
+#stage {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 100vw;
+  height: 100vh;
+  transform: translate(-50%, -50%) scaleX(-1);
+}
+
+#cam {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#gl {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#splash {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 18px;
+  background: var(--bg);
+  transition: opacity 0.6s ease;
+  z-index: 3;
+}
+
+#splash.gone {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#splash p {
+  font-size: 15px;
+  letter-spacing: 0.01em;
+  color: rgba(255, 255, 255, 0.72);
+  text-align: center;
+  max-width: 28ch;
+  line-height: 1.5;
+}
+
+.ring {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+
+#splash.error .ring {
+  display: none;
+}
+
+#retry {
+  font: inherit;
+  font-weight: 500;
+  font-size: 15px;
+  min-height: 48px;
+  padding: 0 26px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #000;
+  cursor: pointer;
+}
+
+#hint {
+  position: fixed;
+  top: max(20px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  font-size: 14px;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+#hint[hidden] {
+  display: none;
+}
+
+#credit {
+  position: fixed;
+  bottom: max(10px, env(safe-area-inset-bottom));
+  left: 12px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  text-decoration: none;
+  direction: ltr;
+  z-index: 2;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring {
+    animation-duration: 3s;
+  }
+}
