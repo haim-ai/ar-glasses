@@ -4,6 +4,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { FaceLandmarker, FilesetResolver, type FaceLandmarkerResult } from "@mediapipe/tasks-vision";
 import { OneEuro } from "./filter";
+import { createFaceMesh } from "./mesh";
 
 const BASE = import.meta.env.BASE_URL;
 const $ = <T extends HTMLElement>(s: string) => document.querySelector(s) as T;
@@ -44,8 +45,12 @@ function makeTracker(delegate: Delegate) {
   });
 }
 
+/** every browser on iPhone / iPad is Safari underneath, and its graphics-chip tracker can run yet never find a face */
+const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
 async function loadTracker(): Promise<{ lm: FaceLandmarker; delegate: Delegate }> {
   files = await FilesetResolver.forVisionTasks(`${BASE}wasm`);
+  if (IOS) return { lm: await makeTracker("CPU"), delegate: "CPU" };
   try {
     return { lm: await makeTracker("GPU"), delegate: "GPU" };
   } catch {
@@ -95,7 +100,7 @@ async function loadGlasses() {
   });
 
   // invisible head and ears: they write depth only, so the temples vanish behind the real head and ears
-  const hidden = DEBUG ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true }) : new THREE.MeshBasicMaterial({ colorWrite: false });
+  const hidden = location.search.includes("occ") ? new THREE.MeshBasicMaterial({ color: 0xff0044, wireframe: true }) : new THREE.MeshBasicMaterial({ colorWrite: false });
   const ball = new THREE.SphereGeometry(1, 40, 28);
   const head = new THREE.Mesh(ball, hidden);
   head.scale.set(0.066, 0.1, 0.1);
@@ -192,6 +197,11 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
   lens.envMapIntensity = 1;
   lens.envMapRotation.set(0.55, 0.45, 0);
   scene.add(rig);
+  // the face scan is its own layer, drawn first, so the glasses always sit on top of it
+  const faceMesh = createFaceMesh("#e8ff5a");
+  const meshScene = new THREE.Scene();
+  meshScene.add(faceMesh.group);
+  renderer.autoClear = false;
 
   // one unit = one camera pixel, origin in the middle of the picture
   let W = video.videoWidth;
@@ -241,10 +251,12 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
       if (tracking && t - seenAt > 300) {
         tracking = false;
         rig.visible = false;
+        faceMesh.hide();
         hint.hidden = false;
       }
       return;
     }
+    faceMesh.update(lm, W, H);
     // eye centres from the corners (stable, unlike the irises which follow the gaze)
     eyeR.copy(pt(lm[33], a)).add(pt(lm[133], b)).multiplyScalar(0.5);
     eyeL.copy(pt(lm[362], a)).add(pt(lm[263], b)).multiplyScalar(0.5);
@@ -285,26 +297,41 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     }
   };
 
-  // watchdog: if the graphics-chip tracker is slow on this phone, move to the processor once
+  // watchdog: if the graphics-chip tracker is slow, throws, or never finds a face, move to the processor once
   let avgMs = 0;
   let samples = 0;
   let switching = false;
-  const watch = (ms: number) => {
+  let errors = 0;
+  let lastErr = "";
+  let everSeen = false;
+  const startedAt = performance.now();
+  const toCPU = () => {
+    if (delegate !== "GPU" || switching) return;
+    switching = true;
+    makeTracker("CPU")
+      .then((cpu) => {
+        const old = landmarker;
+        landmarker = cpu;
+        delegate = "CPU";
+        samples = 0;
+        try {
+          old.close();
+        } catch {
+          /* already gone */
+        }
+      })
+      .catch((e) => (lastErr = String(e)));
+  };
+  const watch = (ms: number, t: number) => {
     avgMs = samples ? avgMs * 0.9 + ms * 0.1 : ms;
     samples++;
-    if (delegate === "GPU" && !switching && samples > 20 && avgMs > 60) {
-      switching = true;
-      makeTracker("CPU")
-        .then((cpu) => {
-          const old = landmarker;
-          landmarker = cpu;
-          delegate = "CPU";
-          samples = 0;
-          old.close();
-        })
-        .catch(() => {});
-    }
+    if (samples > 20 && avgMs > 60) toCPU();
+    if (!everSeen && t - startedAt > 2500) toCPU();
   };
+  canvas.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    lastErr = "webgl context lost";
+  });
 
   const stats = DEBUG ? Object.assign(document.createElement("pre"), { id: "stats" }) : null;
   if (stats) document.body.append(stats);
@@ -318,14 +345,24 @@ function run(first: FaceLandmarker, firstDelegate: Delegate, { rig, head, earR, 
     if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
     lastVideoTime = video.currentTime;
     const t = performance.now();
-    apply(landmarker.detectForVideo(video, t), t);
-    const ms = performance.now() - t;
-    watch(ms);
+    let res: FaceLandmarkerResult;
+    try {
+      res = landmarker.detectForVideo(video, t);
+    } catch (e) {
+      lastErr = String(e).slice(0, 80);
+      if (++errors > 3) toCPU();
+      return;
+    }
+    apply(res, t);
+    if (tracking) everSeen = true;
+    watch(performance.now() - t, t);
+    renderer.clear();
+    renderer.render(meshScene, camera);
     renderer.render(scene, camera);
     if (stats) {
       frames++;
       if (t - fpsAt > 1000) {
-        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H}`;
+        stats.textContent = `${frames} fps · detect ${avgMs.toFixed(0)}ms · ${delegate} · ${W}x${H} · face ${tracking ? "yes" : "no"}${lastErr ? " · " + lastErr : ""}`;
         frames = 0;
         fpsAt = t;
       }
